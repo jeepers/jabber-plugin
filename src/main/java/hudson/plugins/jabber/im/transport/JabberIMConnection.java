@@ -14,7 +14,13 @@ import hudson.plugins.im.IMPresence;
 import hudson.plugins.im.bot.Bot;
 import hudson.plugins.im.tools.ExceptionHelper;
 
+import java.io.InputStream;
+import java.io.IOException;
+import java.io.PrintStream;
 import java.lang.ref.WeakReference;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -23,6 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
+import javax.net.SocketFactory;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 import org.jivesoftware.smack.Chat;
@@ -300,7 +308,7 @@ class JabberIMConnection extends AbstractIMConnection {
 		}
 		
 		if (retryWithLegacySSL) {
-			retryConnectionWithLegacySSL(cfg, originalException);
+			retryConnectionWithLegacySSL(cfg, originalException, pi);
 		}
 
 		if (this.connection.isConnected()) {
@@ -321,11 +329,15 @@ class JabberIMConnection extends AbstractIMConnection {
 	 * See JENKINS-6863
 	 */
 	private void retryConnectionWithLegacySSL(
-			final ConnectionConfiguration cfg, Exception originalException)
+			final ConnectionConfiguration cfg, Exception originalException, ProxyInfo pi)
 			throws XMPPException {
 		try {
 			LOGGER.info("Retrying connection with legacy SSL");
-			cfg.setSocketFactory(SSLSocketFactory.getDefault());
+			if (pi.getProxyType() == ProxyType.HTTP) {
+				cfg.setSocketFactory(new SSLProxySocketFactory(pi));
+			} else {
+				cfg.setSocketFactory(SSLSocketFactory.getDefault());
+			}
 			this.connection = new XMPPConnection(cfg);
 			this.connection.connect();
 		} catch (XMPPException e) {
@@ -338,6 +350,79 @@ class JabberIMConnection extends AbstractIMConnection {
 				throw new XMPPException(e);
 			}
 		}
+	}
+
+	public static class SSLProxySocketFactory extends SocketFactory {
+		
+		static Logger logger = Logger.getLogger(SSLProxySocketFactory.class.getName());
+		private ProxyInfo pi;
+	
+		public SSLProxySocketFactory(ProxyInfo pi) {
+			this.pi = pi;
+		}
+		
+		/**
+		 * {@inheritDoc}
+		 */
+		@Override
+		public Socket createSocket(String host, int port) throws IOException, UnknownHostException {
+		    String request = "CONNECT " + host + ":" + port + " HTTP/1.0\r\n\r\n";
+		    logger.fine(request);
+		    Socket sock = new Socket(pi.getProxyAddress(), pi.getProxyPort());
+		    PrintStream ps = new PrintStream(sock.getOutputStream());
+		    ps.print(request);
+		    ps.flush();
+		    
+		    InputStream in = sock.getInputStream();
+	        int c = 0;
+	        //looking for \r\n\r\n sequence
+	        int look = '\r';
+	        int count = 0;
+	        while (count != 4) {
+	            c = in.read();
+	            if (c == look) {
+	                look = (look == '\r' ? '\n' : '\r');
+	                count++;
+	            } else {
+	                //reset to 0
+	                count = 0;
+	            }
+	            //System.out.print((char) c);
+	        }
+	        
+	        SSLSocketFactory ssf = (SSLSocketFactory) SSLSocketFactory.getDefault();
+	        SSLSocket ssl = (SSLSocket) ssf.createSocket(sock, host, port, true);
+	        ssl.startHandshake();
+	        logger.info("Completed SSL Handshake");            
+			return ssl;
+		}
+	
+		/**
+		 * {@inheritDoc}
+		 */
+		@Override
+		public Socket createSocket(InetAddress host, int port) throws IOException {
+			return null;
+		}
+	
+		/**
+		 * {@inheritDoc}
+		 */
+		@Override
+		public Socket createSocket(String arg0, int arg1, InetAddress arg2, int arg3)
+				throws IOException, UnknownHostException {
+			return null;
+		}
+	
+		/**
+		 * {@inheritDoc}
+		 */
+		@Override
+		public Socket createSocket(InetAddress arg0, int arg1, InetAddress arg2, int arg3)
+				throws IOException {
+			return null;
+		}
+	
 	}
 
 	/**
